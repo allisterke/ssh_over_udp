@@ -1,13 +1,15 @@
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
 
-#include<arpa/inet.h>
-#include<sys/socket.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 #include <unistd.h>
 
-#include <errno.h>
+#include <cerrno>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
 
 #define PORT 11444
 #define BUFLEN 1024
@@ -95,7 +97,7 @@ void *wait_for_reply(void *arg) {
 							ssh_addr.sin_port = htons(22);
 							inet_aton("127.0.0.1", &ssh_addr.sin_addr);
 
-							if(connect(server_sock, &ssh_addr, sizeof(ssh_addr)) < 0) {
+							if(connect(server_sock, (const struct sockaddr *)&ssh_addr, sizeof(ssh_addr)) < 0) {
 								printf("cannot connect local ssh server\n");
 								close(server_sock);
 								server_sock = -1;
@@ -116,7 +118,6 @@ void *wait_for_reply(void *arg) {
 			}
 		}
 		else {
-			printf(strerror(errno));
 			break;
 		}
 	}
@@ -154,7 +155,7 @@ bool client_tcp(int port) {
 	}
 
 	struct sockaddr_in listen_addr, client_addr;
-	int alen;
+	socklen_t alen;
 
 	memset((char*)&listen_addr, 0, sizeof(listen_addr));
 	listen_addr.sin_family = AF_INET;
@@ -177,7 +178,6 @@ bool client_tcp(int port) {
 		client_sock = accept(tcp_sock, (struct sockaddr *)&client_addr, &alen);
 		if(client_sock < 0) {
 			printf("accept client sock failed\n");
-			printf(strerror(errno));
 			continue;
 		}
 

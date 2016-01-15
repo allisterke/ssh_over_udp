@@ -1,5 +1,9 @@
-all:
-	gcc udp_msg.c -lpthread -o udp_msg -g -std=c99
+all: tunnel
+
+tunnel: tunnel.cpp tap.cpp tap.h
+	echo $<
+	g++ $< -o tunnel -lpthread
 
 clean:
-	rm udp_msg
+	rm -f tunnel
+	rm -f *.o
