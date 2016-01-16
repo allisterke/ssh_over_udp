@@ -1,8 +1,7 @@
 all: tunnel
 
-tunnel: tunnel.cpp tap.cpp tap.h
-	echo $<
-	g++ $< -o tunnel -lpthread
+tunnel: 
+	g++ tunnel.cpp tap.cpp tap.h -o tunnel -pthread -std=c++11
 
 clean:
 	rm -f tunnel

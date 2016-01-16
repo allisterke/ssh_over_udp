@@ -10,122 +10,76 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <thread>
+#include <list>
+#include <vector>
+#include <iostream>
 
-#define PORT 11444
-#define BUFLEN 1024
-#define true 1
-#define false 0
-#define bool int
+#include "tap.h"
 
-struct sockaddr_in si_me, si_other;
-char buf[BUFLEN];
+#define PORT 11555
+#define BUFLEN 1300
+#define MTU 1200
+
+using namespace std;
+
+struct sockaddr_in si_me, si_other, si_tmp;
 int sock;
 socklen_t addr_len = sizeof(struct sockaddr);
 
 int connected = false;
 int first = true;
 
-char remote_ip[16] = {};
-int remote_port = 0;
-
-int tcp_sock = 0;
-int client_sock = 0;
-char crbuf[BUFLEN];
-
-int client_mode = true;
-
-int server_sock = -1;
-char srbuf[BUFLEN];
-
-void *server_read(void *arg) {
-	printf("starting reading from server side\n");
-
+void transfer_from_connection_to_tunnel(int fd) {
+	vector<char> buf(BUFLEN);
 	while(true) {
-		int len = read(server_sock, srbuf, BUFLEN);
-		if(len > 0) {
-			printf("read %d bytes\n", len);
-			if(sendto(sock, srbuf, len, 0, (struct sockaddr*)&si_other, sizeof(struct sockaddr)) < 0) {
-				printf("send to client error\n");
-			}
-		}
-		else {
-			printf("server sock read error\n");
-			break;
-		}
-	}
-	return NULL;
-}
-
-void *wait_for_reply(void *arg) {
-	pthread_t tmp;
-	int len = 0;
-	while(true) {
-		len = recvfrom(sock, buf, BUFLEN, 0, (struct sockaddr*)&si_other, &addr_len);
-		connected = true;
+		int len = recvfrom(sock, buf.data(), buf.size(), 0, (struct sockaddr*)&si_tmp, &addr_len);
 		if(len >= 0) {
 			if(first) {
+				connected = true;
 				first = false;
-				printf("connected from %s:%d\n", inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port));
+				si_other = si_tmp;
+				printf("connected from %s:%d\n", 
+					inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port));
 				// keep connection
 				sendto(sock, "", 0, 0, (struct sockaddr*)&si_other, sizeof(struct sockaddr));
-
-				strcpy(remote_ip, inet_ntoa(si_other.sin_addr));
-				remote_port = ntohs(si_other.sin_port);
 			}
 			else if(len > 0) {
-			//	fwrite(buf, len, 1, stdout);
-			//	printf("\n");
-				if(client_mode) {
-					if(client_sock > 0) {
-						if(write(client_sock, buf, len) < 0) {
-							printf("client sock write error\n");
-							close(client_sock);
-							client_sock = -1;
-						}
-					}
-				}
-				else {
-					if(server_sock < 0) {
-						server_sock = socket(AF_INET, SOCK_STREAM, 0);
-						if(server_sock < 0) {
-							printf("cannot create server sock\n");
-						}
-						else {
-							struct sockaddr_in ssh_addr;
-							memset((char *)&ssh_addr, 0, sizeof(ssh_addr));
-							ssh_addr.sin_family = AF_INET;
-							ssh_addr.sin_port = htons(22);
-							inet_aton("127.0.0.1", &ssh_addr.sin_addr);
-
-							if(connect(server_sock, (const struct sockaddr *)&ssh_addr, sizeof(ssh_addr)) < 0) {
-								printf("cannot connect local ssh server\n");
-								close(server_sock);
-								server_sock = -1;
-							}
-							else {
-								pthread_create(&tmp, NULL, server_read, NULL);
-							}
-						}
-						
-					}
-					if(server_sock > 0) {
-						if(write(server_sock, buf, len) < 0) {
-							close(server_sock);
-							server_sock = -1;
-						}
-					}
+				if(memcmp(&si_tmp, &si_other, sizeof(si_other))) {
+					printf("receive data from other peer: %s:%d, original peer: %s:%d\n",
+						inet_ntoa(si_tmp.sin_addr), ntohs(si_tmp.sin_port),
+						inet_ntoa(si_other.sin_addr), ntohs(si_other.sin_port));
+				} else {
+					write(fd, buf.data(), len);
 				}
 			}
 		}
 		else {
+			printf("read from udp socket error\n");
 			break;
 		}
 	}
-	
-	return NULL;
 }
 
-void *heartbeat(void *arg) {
+void transfer_from_tunnel_to_connection(int fd) {
+	vector<char> buf(BUFLEN);
+	while(true) {
+		int len = read(fd, buf.data(), buf.size());
+		if(len > 0) {
+			if(sendto(sock, buf.data(), len, 0, 
+				(struct sockaddr *)&si_other, sizeof(struct sockaddr)) < 0) {
+				printf("send to peer error\n");
+				break;
+			}
+		}
+		else if(len < 0) {
+			printf("read from tunnel error\n");
+			break;
+		}
+	}
+}
+
+void heartbeat() {
 	while(true) {
 		sendto(sock, "", 0, 0, (struct sockaddr*)&si_other, sizeof(struct sockaddr));
 		sleep(1);
@@ -147,66 +101,36 @@ bool init_internal_socket() {
 	return true;
 }
 
-bool client_tcp(int port) {
-	tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
-	if(tcp_sock < 0) {
-		printf("cannot create tcp listen\n");
-		return false;
-	}
+void config_tap(const char *local_ip, string &dev_name) {
+	static char cmd[1024] = {};
 
-	struct sockaddr_in listen_addr, client_addr;
-	socklen_t alen;
+	sprintf(cmd, "ip addr add %s/24 dev %s", local_ip, dev_name.c_str());
+	system(cmd);
 
-	memset((char*)&listen_addr, 0, sizeof(listen_addr));
-	listen_addr.sin_family = AF_INET;
-	listen_addr.sin_port = htons(port);
-	listen_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+	sprintf(cmd, "ip link set up dev %s", dev_name.c_str());
+	system(cmd);
 
-	if(bind(tcp_sock, (struct sockaddr *)&listen_addr, sizeof(struct sockaddr)) < 0) {
-		printf("cannot bind tcp listen\n");
-		return false;
-	}
-
-	if(listen(tcp_sock, 5) < 0) {
-		printf("cannot listen client tcp\n");
-		return false;
-	}
-
-	printf("listenning on %d\n", port);
-
-	while(true) {
-		client_sock = accept(tcp_sock, (struct sockaddr *)&client_addr, &alen);
-		if(client_sock < 0) {
-			printf("accept client sock failed\n");
-			continue;
-		}
-
-		while(true) {
-			int length = read(client_sock, crbuf, BUFLEN);
-			if(length < 0) {
-				close(client_sock);
-				client_sock = 0;
-			}
-			else {
-				printf("read %d bytes from client\n", length);
-				sendto(sock, crbuf, length, 0, (struct sockaddr*)&si_other, sizeof(struct sockaddr));
-			}
-		}
-	}
-
-	return true;
+	sprintf(cmd, "ip link set mtu %d dev %s", MTU, dev_name.c_str());
+	system(cmd);
 }
 
 int main(int argc, char **argv) {
-	pthread_t tid;
-	void *status;
-
 	if(!init_internal_socket()) {
-		printf("cannot init internal socket\n");
+		printf("cannot init internal udp socket\n");
 		return -1;
 	}
 
-	pthread_create(&tid, NULL, wait_for_reply, NULL);
+        std::string dev_name;
+        int fd = tap_alloc(dev_name);
+        if(fd < 0) {
+		printf("cannot create tap device\n");
+		return -1;
+	}
+
+        std::cout << "dev name: " << dev_name << std::endl;
+	config_tap(argc > 1 ? argv[1] : "192.168.1.100", dev_name);
+
+	thread in(transfer_from_connection_to_tunnel, fd);
 
 	struct sockaddr_in test_si;
 	memset((char *)&test_si, 0, sizeof(test_si));
@@ -222,29 +146,17 @@ int main(int argc, char **argv) {
 			int slen = sendto(sock, "", 0, 0, (struct sockaddr*)&test_si, sizeof(struct sockaddr));
 			if(slen < 0) {
 				printf("send error in connecting\n");
-				exit(0);
+				return -1;
 			}
 		}
 		sleep(1);
 	}
+
+	thread hb(heartbeat);
+	thread out(transfer_from_tunnel_to_connection, fd);
 	
-	pthread_t sid;
-	pthread_create(&sid, NULL, heartbeat, NULL); 
-
-	if(strcmp(argv[1], "-s") == 0) {
-		client_mode = false;
-	}
-	else {
-		client_tcp(2222);
-	}
-
-	
-//	char msg[1024];
-//	while(gets(msg)) {
-//		sendto(sock, msg, strlen(msg), 0, (struct sockaddr*)&si_other, sizeof(struct sockaddr));
-//	}
-
-	pthread_join(tid, &status);
+	in.join();
+	out.join();
 
 	printf("end\n");
 
